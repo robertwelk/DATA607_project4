@@ -1,0 +1,200 @@
+---
+title: "DATA 607 - Project 4"
+author: "Rob Welk"
+date: "April 13, 2019"
+output: 
+  html_document:
+    toc: true 
+    toc_depth: 3 
+    number_sections: true  
+    theme: united  
+    highlight: tango 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Project objectives
+
+The goal of this project is to classify email documents as spam(unsolicited) or ham (solicited) based on already classfied training documents.  Files for download were made available by spamassassin at https://spamassassin.apache.org/old/publiccorpus/. 
+
+
+# Methodology 
+
+The spam and ham corpa are downloaded and then loaded into R.  The content of each email document is extracted and tidying operations are performed.  A document term matrix is developed and a subset is used as training and test groups.  A supervised model to predict document classification is trianed and then tested. Preparing the documents for the model requires data to be transformed from corpus to dataframe form, and vice versa at points throughout the process.  
+
+
+# Packages used
+
+```{r, warning=FALSE, message=FALSE}
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(caret)
+#library(SnowballC)
+``` 
+
+
+# Load Corpus 
+
+Files '20021010_easy_ham.tar.bz2' 20021010_spam.tar.bz2 were downloaded from spamassassin to the working directory. There are 2551 documents in the ham corpus and 499 documents in the spam corpus.
+```{r}
+
+# working directories
+ham.dir <- "C:/Users/robbj/CUNY SPS/DATA607/spamham/easy_ham/"
+spam.dir <- "C:/Users/robbj/CUNY SPS/DATA607/spamham/spam/"
+
+# create vectora of document names
+ham.files <- list.files(ham.dir)
+spam.files <- list.files(spam.dir)
+```
+
+
+# Tidy the text document
+
+Several of the documents were examined manually in a text editor.  The documents are structured in a manner where the first set of lines provide meta information regarding the email.  The actual content of the emails appear after the meta information. A blank line always seperates the two sections.  This condition will be exploited to extract the content of the email, leaving the meta information behind.  After that, text transformation functions from the tm package will be applied to the spam and ham corpus, removing whitespace, numbers, punctuation, etc.
+
+
+## Email content extraction
+A loop will be run, iterating over each file in the corpus.  For each document, the content of the email will be extracted by filtering out all lines prior to the first blank line. The results are stored in a dataframe.
+
+
+### Ham 
+```{r}
+#blank dataframe to store email content 
+ham.df <- data.frame(content=NA, doc.num=NA, stringsAsFactors = FALSE)
+
+for(i in 1:length(ham.files)){
+  input.file <- readLines(paste0(ham.dir,ham.files[i])) %>% 
+                          data.frame(stringsAsFactors = F) 
+  colnames(input.file) <- 'content'
+  first.blank.row <- min(which(input.file$content==""))
+  body <- slice(input.file, -1:-(first.blank.row))
+  body <- str_c(body$content, collapse=" ")
+  tmp.df <- data.frame(content=body, doc.num=ham.files[i])
+  ham.df <- rbind(ham.df,tmp.df)
+ }
+ham.df <- ham.df %>% slice(-1)
+```
+
+
+### Spam
+```{r}
+#blank dataframe to store 
+spam.df <- data.frame(content=NA, doc.num=NA, stringsAsFactors = FALSE)
+
+for(i in 1:length(spam.files)){
+  input.file <- readLines(paste0(spam.dir, spam.files[i])) %>% 
+                          data.frame(stringsAsFactors = F) 
+  colnames(input.file) <- 'content'
+  first.blank.row <- min(which(input.file$content==""))
+  body <- slice(input.file, -1:-(first.blank.row))
+  body <- str_c(body$content, collapse=" ")
+  tmp.df <- data.frame(content=body, doc.num=spam.files[i])
+  spam.df <- rbind(spam.df,tmp.df)
+ }
+spam.df <- spam.df %>% slice(-1)
+```
+
+
+### Corpus form
+The spam and ham documents are now put into a corpus structure.  For each document in the corpus there is a list of length 2.  The first list element contains the content of the document.  The second list element contains metadata.  
+```{r}
+ham.corpus <- VCorpus(VectorSource(ham.df$content))
+spam.corpus <- VCorpus(VectorSource(spam.df$content))
+corpus <- c(ham.corpus,spam.corpus)
+```
+
+
+## tm Transformations
+Some transformations from the 'tm' package are applied to remove unwanted characters. These tm_map functions can be applied acorss each document in the corpus. 
+```{r}
+
+corpus <- corpus %>% tm_map(content_transformer(PlainTextDocument))
+corpus <- corpus %>% tm_map(content_transformer(removePunctuation))
+corpus <- corpus %>% tm_map(content_transformer(removeNumbers))
+corpus <- tm_map(corpus, removeWords, words = stopwords("en"))
+corpus <- tm_map(corpus, content_transformer(tolower))
+#corpus <- tm_map(corpus, stemDocument)
+corpus <- tm_map(corpus, stripWhitespace)
+
+```
+
+# Document-term matrix 
+A document-term matrix is created from the corpus where each document is a row and each column is word. Since there is high variability of diction across emails, the matrix is sparse, and a portion of the less frequent terms are removed so that downstream model performance may be improved (in terms of run-time). The matrix is then tidied using functionality of the tidytext package where all terms appear in one column and their associated columns are in another. 
+
+```{r}
+dtm <- DocumentTermMatrix(corpus) %>%  removeSparseTerms( 0.95)
+tidy.dtm <- tidy(dtm)
+
+
+tidy.dtm$classification <- ifelse(tidy.dtm$document <= length(ham.files),"ham","spam")
+head(tidy.dtm)
+
+data("stop_words")
+tidy.dtm <- tidy.dtm %>%
+  anti_join(stop_words, by= c("term"="word"))
+
+
+# find common words
+tidy.dtm %>%  group_by(term, classification) %>% 
+              count() %>% arrange(desc(n)) %>% 
+              filter(n>150) %>% 
+              ggplot(aes(x=term,y=n,fill=classification)) + 
+                  geom_bar(stat='identity') +
+                  coord_flip()
+#top ham words
+tidy.dtm %>% filter(classification=='ham') %>%  group_by(term) %>% count() %>% arrange(desc(n))
+
+#top spam words
+tidy.dtm %>% filter(classification=='spam') %>%  group_by(term) %>% count() %>% arrange(desc(n))
+
+
+# add more stop words based on the barplot and remove from tidy dataframe. This was done in an iterative manner by finding words common to spam and ham from the barplot and finding junk terms from the table output
+more.stops <- tibble(term=c("wrote","time", "people","email","free", "dont","message","mail", "httpwwwnewsisfreecomclick","rpmlistfreshrpmsnet", "rpmlist","sfnet","httplistsfreshrpmsnetmailmanlistinforpmlist","information"))
+tidy.dtm <- tidy.dtm %>%
+  anti_join(more.stops, by= "term")
+
+
+```
+
+# Classification model
+Now that the data is prepared a model can be run that predicts document classification.  It is common for the data to be split 75%/25% for training and test sets.  After attempting to run the model in this manner, error messages were given that there was insuffient memory to complete.  After changing parameters to reduce memory usage, the model ran for about 6 hours before once again failing, even with 10% of the data used for training.  The code used for model training and testing is commented out.  
+
+## Split into training and test sets
+```{r}
+# Set Seed \
+set.seed(101)  
+
+# Now Selecting 75% of data as sample from total 'n' rows of the data 
+sample <- sample.int(n = nrow(tidy.dtm), size = floor(.10*nrow(tidy.dtm)), replace = F)
+train <- tidy.dtm[sample, ]
+test  <- tidy.dtm[-sample, ]
+
+train <- as.data.frame(train)
+train$classification <- as.factor(train$classification)
+```
+
+## Train the model
+```{r}
+# Train the model using the carret package, parameters added are aimed to reduce memory usage 
+#control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+
+
+
+#fit <- train(classification ~ ., data = train, method="rf", metric=metric, tuneLength=15, trControl=control)
+
+# Check accuracy on training.
+## predict(fit, newdata = train)
+```
+
+## Test the model
+```{r}
+#predict(fit, newdata = test)
+
+```
+
+
+
